@@ -3,6 +3,32 @@ import threading
 import sqlite3
 import os
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+from dotenv import load_dotenv
+
+# Get shared key from .env
+load_dotenv()
+keyword = os.environ["SHARED_KEY"]
+keyword_numbers = [ord(c) for c in keyword]
+
+start = 32
+size = 256 - 32
+
+def vigenere(text, mode):
+    output = ""
+    for i, c in enumerate(text):
+        pos = ord(c) - start
+        if 0 <= pos < size:
+            if mode == "encrypt":
+                shift = keyword_numbers[i % len(keyword)]
+                output += chr((pos + shift) % size + start)
+            elif mode == "decrypt":
+                shift = keyword_numbers[i % len(keyword)]
+                output += chr((pos - shift) % size + start)
+            else:
+                output += c
+        else:
+            output += c
+    return output
 
 # Variables for holding information about connections
 connections = []
@@ -38,12 +64,15 @@ class Client(threading.Thread):
                     connections.remove(self)
                 break
             if data:
-                message = data.decode("utf-8")
+                message = vigenere(data.decode(), "decrypt")
                 print("ID " + str(self.id) + " (" + str(self.name) + "): " + message)
                 for client in connections:
                     if client.id != self.id:
                         try:
-                            client.socket.sendall(str.encode(f"{self.name}: {message}"))
+                            outgoing_message = vigenere(
+                                f"{self.name}: {message}", "encrypt"
+                            )
+                            client.socket.sendall(outgoing_message.encode())
                         except:
                             pass
 
