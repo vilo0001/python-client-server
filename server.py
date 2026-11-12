@@ -18,12 +18,12 @@ shared_kdf = Argon2id(
     ad=None,
     secret=None,
 )
-keyword_numbers = list(shared_kdf.derive(keyword.encode()))  # 32 numbers (0-255)
+vigenere_key = list(shared_kdf.derive(keyword.encode()))  # 32 numbers (0-255)
 
 def vigenere(data, mode):
     output = bytearray()
     for i, b in enumerate(data):
-        shift = keyword_numbers[i % len(keyword_numbers)]
+        shift = vigenere_key[i % len(vigenere_key)]
         if mode == "encrypt":
             output.append((b + shift) % 256)
         elif mode == "decrypt":
