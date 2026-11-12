@@ -18,7 +18,7 @@ shared_kdf = Argon2id(
     ad=None,
     secret=None,
 )
-keyword_numbers = list(shared_kdf.derive(keyword.encode("utf-8")))  # 32 numbers (0-255)
+keyword_numbers = list(shared_kdf.derive(keyword.encode()))  # 32 numbers (0-255)
 
 def vigenere(data, mode):
     output = bytearray()
