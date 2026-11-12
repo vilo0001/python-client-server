@@ -5,48 +5,63 @@ from pick import pick
 import socket
 import threading
 from dotenv import load_dotenv
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
-# Get shared key from .env
 load_dotenv()
 keyword = os.environ["SHARED_KEY"]
-keyword_numbers = [ord(c) for c in keyword]
+chat_salt = os.environ["CHAT_SALT"].encode()
+shared_kdf = Argon2id(
+    salt=chat_salt,
+    length=32,
+    iterations=3,
+    lanes=4,
+    memory_cost=64 * 1024,
+    ad=None,
+    secret=None,
+)
+# Derived KDF key made with the shared chat_salt for vigenere encryption/decryption.
+vigenere_key = list(shared_kdf.derive(keyword.encode()))
 
-start = 32          # don't include new line and so on.
-size = 256 - 32     # size without the first 32.
+def vigenere(data, mode):
+    output = bytearray()
+    for i, b in enumerate(data):
+        shift = vigenere_key[i % len(vigenere_key)]
+        if mode == "encrypt":
+            output.append((b + shift) % 256)
+        elif mode == "decrypt":
+            output.append((b - shift) % 256)
+    return bytes(output)
 
-def vigenere(text, mode):
-    output = ""
-    for i, c in enumerate(text):
-        pos = ord(c) - start
-        if 0 <= pos < size:
-            if mode == "encrypt":
-                shift = keyword_numbers[i % len(keyword)]
-                output += chr((pos + shift) % size + start)
-            elif mode == "decrypt":
-                shift = keyword_numbers[i % len(keyword)]
-                output += chr((pos - shift) % size + start)
-            else:
-                output += c
-        else:
-            output += c
-    return output
+
+def encrypt(text):
+    return vigenere(text.encode("utf-8"), "encrypt").hex().encode()
+
+
+def decrypt(line):
+    return vigenere(bytes.fromhex(line.decode()), "decrypt").decode()
+
+
+def send_encrypted(sock, text):
+    sock.sendall(encrypt(text) + b"\n")
 
 # Wait for incoming data from server
 def receive(socket, signal, username_input):
+    buffer = b""
     while signal:
         try:
-            data = socket.recv(1024)
+            data = socket.recv(4096)
             if not data:
                 break
-            message = vigenere(data.decode("utf-8"), "decrypt")
+            buffer += data
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                message = decrypt(line)
 
-            # 1. Clear the current line (\r moves to start, \033[K clears the line)
-            sys.stdout.write("\r\033[K")
-            # 2. Print the incoming message from another user
-            print(message)
-            # 3. Re-print the input prompt at the bottom
-            sys.stdout.write(f"{username_input}: ")
-            sys.stdout.flush()
+                # Pretty terminal magic.
+                sys.stdout.write("\r\033[K")
+                print(message)
+                sys.stdout.write(f"{username_input}: ")
+                sys.stdout.flush()
         except:
             print("\nYou have been disconnected from the server")
             signal = False
@@ -78,9 +93,9 @@ except:
 
 # Send authentication data to server (option, username, password)
 try:
-    sock.sendall((option + "\n").encode("utf-8"))
-    sock.sendall((username_input + "\n").encode("utf-8"))
-    sock.sendall((password_input + "\n").encode("utf-8"))
+    send_encrypted(sock, option)
+    send_encrypted(sock, username_input)
+    send_encrypted(sock, password_input)
 
     # Wait for server authentication response
     response_buffer = b""
@@ -91,7 +106,7 @@ try:
         response_buffer += chunk
 
     response_line, _ = response_buffer.split(b"\n", 1)
-    response_msg = response_line.decode("utf-8")
+    response_msg = decrypt(response_line)
     print("Server response:", response_msg)
 
     if "successful" not in response_msg.lower():
@@ -109,20 +124,20 @@ except Exception as e:
 sys.stdout.write(f"{username_input}: ")
 sys.stdout.flush()
 
-# Create new thread to wait for data (passing username_input)
+# Create new thread to wait for data
 receiveThread = threading.Thread(
     target=receive, args=(sock, True, username_input), daemon=True
 )
 receiveThread.start()
 
-# Send data to server using sys.stdin.readline for clean terminal flow
+# Send data to server using sys.stdin.readline for pretty terminal
 while True:
     message = sys.stdin.readline()
     if not message:
         break
-    message = message.strip()
+    message = message.strip() # Remove leaning and trailing whitespaces + \n
     if message:
-        sock.sendall(vigenere(message, "encrypt").encode("utf-8"))
+        send_encrypted(sock, message)
 
     # Re-print the prompt on the new line after you hit enter
     sys.stdout.write(f"{username_input}: ")

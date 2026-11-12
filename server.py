@@ -8,27 +8,36 @@ from dotenv import load_dotenv
 # Get shared key from .env
 load_dotenv()
 keyword = os.environ["SHARED_KEY"]
-keyword_numbers = [ord(c) for c in keyword]
+chat_salt = os.environ["CHAT_SALT"].encode()
+shared_kdf = Argon2id(
+    salt=chat_salt,
+    length=32,
+    iterations=3,
+    lanes=4,
+    memory_cost=64 * 1024,
+    ad=None,
+    secret=None,
+)
+keyword_numbers = list(shared_kdf.derive(keyword.encode("utf-8")))  # 32 numbers (0-255)
 
-start = 32
-size = 256 - 32
+def vigenere(data, mode):
+    output = bytearray()
+    for i, b in enumerate(data):
+        shift = keyword_numbers[i % len(keyword_numbers)]
+        if mode == "encrypt":
+            output.append((b + shift) % 256)
+        elif mode == "decrypt":
+            output.append((b - shift) % 256)
+    return bytes(output)
 
-def vigenere(text, mode):
-    output = ""
-    for i, c in enumerate(text):
-        pos = ord(c) - start
-        if 0 <= pos < size:
-            if mode == "encrypt":
-                shift = keyword_numbers[i % len(keyword)]
-                output += chr((pos + shift) % size + start)
-            elif mode == "decrypt":
-                shift = keyword_numbers[i % len(keyword)]
-                output += chr((pos - shift) % size + start)
-            else:
-                output += c
-        else:
-            output += c
-    return output
+def encrypt(text):
+    return vigenere(text.encode(), "encrypt").hex().encode()
+
+def decrypt(line):
+    return vigenere(bytes.fromhex(line.decode()), "decrypt").decode()
+
+def send_encrypted(sock, text):
+    sock.sendall(encrypt(text) + b"\n")
 
 # Variables for holding information about connections
 connections = []
@@ -37,7 +46,7 @@ total_connections = 0
 # Create database
 conn = sqlite3.connect('users.db', check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute('CREATE TABLE IF NOT EXISTS users (username TEXT, salt BLOB, password BLOB)')
+cursor.execute('CREATE TABLE IF NOT EXISTS users (username TEXT UNIQUE, salt BLOB, password BLOB)')
 conn.commit()
 
 # Client class, new instance created for each connected client
@@ -54,33 +63,35 @@ class Client(threading.Thread):
         return str(self.id) + " " + str(self.address)
     
     def run(self):
+        buffer = b""
         while self.signal:
             try:
-                data = self.socket.recv(32)
+                data = self.socket.recv(4096)
+                if not data:
+                    raise ConnectionError
             except:
                 print("Client " + str(self.name) + " (" + str(self.address) + ") has disconnected")
                 self.signal = False
                 if self in connections:
                     connections.remove(self)
                 break
-            if data:
-                message = vigenere(data.decode(), "decrypt")
+            buffer += data
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    message = decrypt(line)
+                except ValueError:
+                    continue
                 print("ID " + str(self.id) + " (" + str(self.name) + "): " + message)
                 for client in connections:
                     if client.id != self.id:
                         try:
-                            outgoing_message = vigenere(
-                                f"{self.name}: {message}", "encrypt"
-                            )
-                            client.socket.sendall(outgoing_message.encode())
+                            send_encrypted(client.socket, f"{self.name}: {message}")
                         except:
                             pass
 
 def registerUser(username, password):
     username = username.lower().strip()
-    cursor.execute("SELECT * FROM users WHERE username=?", (username,))
-    if cursor.fetchone() is not None:
-        return False, "Username already exists."
 
     salt = os.urandom(16)
     kdf = Argon2id(
@@ -94,11 +105,14 @@ def registerUser(username, password):
     )
     key = kdf.derive(password.encode())
 
-    cursor.execute(
-        "INSERT INTO users (username, salt, password) VALUES (?, ?, ?)",
-        (username, salt, key),
-    )
-    conn.commit()
+    try:
+        cursor.execute(
+            "INSERT INTO users (username, salt, password) VALUES (?, ?, ?)",
+            (username, salt, key),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return False, "Username already exists."
     return True, "Registration successful."
 
 def loginUser(username, password):
@@ -137,7 +151,7 @@ def handle_client_connection(sock, address):
             data_buffer += chunk
             while b"\n" in data_buffer and len(lines) < 3:
                 line, data_buffer = data_buffer.split(b"\n", 1)
-                lines.append(line.decode().strip())
+                lines.append(decrypt(line).strip())
 
         option, username, password = lines[0], lines[1], lines[2]
 
@@ -148,7 +162,7 @@ def handle_client_connection(sock, address):
         else:
             success, msg = False, "Invalid option."
 
-        sock.sendall((msg + "\n").encode())
+        send_encrypted(sock, msg)
 
         if not success:
             sock.close()
